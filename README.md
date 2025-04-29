@@ -1,2 +1,3 @@
 # sep45-reference
-SEP-45 reference implementation
+
+This repository contains a reference implementation of SEP-45, a web authentication standard for contract accounts.

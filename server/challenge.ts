@@ -46,6 +46,7 @@ export async function getChallenge(
   }
   const nonce = await generateNonce(request.account);
 
+  // NOTE: in js, we can use the `nativeToScVal` helper but we preferred to build the Sc{suffix} objects manually as a reference for other languages.
   const fields = [
     new xdr.ScMapEntry({
       key: xdr.ScVal.scvSymbol("account"),

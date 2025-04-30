@@ -7,16 +7,17 @@ import {
   Networks,
   scValToNative,
   SorobanRpc,
+  StellarToml,
   TransactionBuilder,
   xdr,
 } from "npm:stellar-sdk";
 import { createHash } from "node:crypto";
-import { fetchSigningKey } from "./toml.ts";
 import { Buffer } from "node:buffer";
 import jwt from "npm:jsonwebtoken";
 import { generateNonce, verifyNonce } from "./nonce.ts";
 import xdrParser from "npm:@stellar/js-xdr";
 
+const network = Networks[Deno.env.get("NETWORK")! as keyof typeof Networks];
 const webAuthContract = new Contract(Deno.env.get("WEB_AUTH_CONTRACT_ID")!);
 const sourceKeypair = Keypair.fromSecret(Deno.env.get("SOURCE_SIGNING_KEY")!);
 const sep10SigningKeypair = Keypair.fromSecret(
@@ -40,10 +41,19 @@ export async function getChallenge(
 ): Promise<ChallengeResponse> {
   const sourceAccount = await rpc.getAccount(sourceKeypair.publicKey());
 
+  // Fetch the signing key from the client domain
   let clientDomainAddress: string | undefined = undefined;
   if (request.client_domain !== undefined) {
-    clientDomainAddress = await fetchSigningKey(request.client_domain);
+    try {
+    const clientToml = await StellarToml.Resolver.resolve(request.client_domain);
+    clientDomainAddress = clientToml.SIGNING_KEY!;
+    } catch (e) {
+      throw new Error(
+        `Failed to fetch SIGNING_KEY from ${request.client_domain}: ${e}`,
+      );
+    }
   }
+
   const nonce = await generateNonce(request.account);
 
   // NOTE: in js, we can use the `nativeToScVal` helper but we preferred to build the Sc{suffix} objects manually as a reference for other languages.
@@ -80,7 +90,6 @@ export async function getChallenge(
       key: xdr.ScVal.scvSymbol("web_auth_domain_account"),
       val: nativeToScVal(sep10SigningKeypair.publicKey()),
     }),
-
   ];
 
   const args = [
@@ -88,7 +97,7 @@ export async function getChallenge(
   ];
   const builtTransaction = new TransactionBuilder(sourceAccount, {
     fee: BASE_FEE,
-    networkPassphrase: Networks.TESTNET,
+    networkPassphrase: network,
   })
     .addOperation(webAuthContract.call("web_auth_verify", ...args))
     .setTimeout(300)
@@ -96,14 +105,12 @@ export async function getChallenge(
 
   // Simulate the transaction to get the authorization entries
   const simulatedTransaction = await rpc.simulateTransaction(builtTransaction);
-  // Check if the response is a success
-  let authEntries: xdr.SorobanAuthorizationEntry[];
-  if ("result" in simulatedTransaction) {
-    const result = simulatedTransaction.result!;
-    authEntries = result.auth;
-  } else {
-    throw new Error("Transaction simulation failed");
+  if (SorobanRpc.Api.isSimulationError(simulatedTransaction)) {
+    throw new Error(
+      `Transaction simulation failed: ${simulatedTransaction.error}`,
+    );
   }
+  const authEntries = simulatedTransaction.result!.auth;
 
   // Sign the server's authorization entry
   const finalAuthEntries = authEntries.map(async (entry) => {
@@ -113,7 +120,7 @@ export async function getChallenge(
       entry.credentials().address().address().switch() ===
         xdr.ScAddressType.scAddressTypeAccount()
     ) {
-      const validUntilLedgerSeq = (await rpc.getLatestLedger()).sequence + 1;
+      const validUntilLedgerSeq = (await rpc.getLatestLedger()).sequence + 10;
       const signed = await authorizeEntry(
         entry,
         sep10SigningKeypair,
@@ -137,7 +144,7 @@ export async function getChallenge(
 
   return {
     authorization_entries: xdrBuffer.toString("base64"),
-    network_passphrase: Networks.TESTNET,
+    network_passphrase: network,
   } as ChallengeResponse;
 }
 
@@ -204,10 +211,10 @@ export async function getToken(
   );
 
   // Check if the response is a success
-  if ("result" in simulatedTransaction) {
-    // Simulation was successful
-  } else {
-    throw new Error("Transaction simulation failed");
+  if (SorobanRpc.Api.isSimulationError(simulatedTransaction)) {
+    throw new Error(
+      `Transaction simulation failed: ${simulatedTransaction.error}`,
+    );
   }
 
   const webAuthDomain = scValToNative(
@@ -234,9 +241,10 @@ export async function getToken(
     sub: account,
     iat: Math.floor(Date.now() / 1000),
     exp: Math.floor(Date.now() / 1000) + 300,
-    jti: createHash("sha256").update(Buffer.from(invokeOp.toXDR())).digest(
-      "hex",
-    ),
+    jti: createHash("sha256").update(Buffer.from(invokeOp.toXDR().buffer))
+      .digest(
+        "hex",
+      ),
     client_domain: clientDomain,
     home_domain: homeDomain,
   }, Deno.env.get("JWT_SECRET")!);

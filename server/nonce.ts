@@ -30,9 +30,6 @@ export async function verifyNonce(
       key,
       nonce,
     ]);
-    if (nonce === undefined) {
-      throw new Error("nonce not found");
-    }
 
     if (storedNonce.value === null || storedNonce.value.used) {
       return false;

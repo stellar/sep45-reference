@@ -1,7 +1,11 @@
 {
   "tasks": {
     "dev": "deno run --watch --allow-all --unstable-kv main.ts",
-    "test": "deno test --allow-all --unstable-kv"
+    "test": "deno test --allow-read --allow-env --allow-net --unstable-kv"
+  },
+  "compilerOptions": {
+    "lib": ["deno.window", "deno.unstable"],
+    "strict": true
   },
   "imports": {
     "@oak/oak": "jsr:@oak/oak@^17.1.3",

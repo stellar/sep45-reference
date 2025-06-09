@@ -1,11 +1,7 @@
 import {
   authorizeEntry,
   BASE_FEE,
-  Contract,
-  Keypair,
   nativeToScVal,
-  Networks,
-  scValToNative,
   SorobanRpc,
   StellarToml,
   TransactionBuilder,
@@ -16,32 +12,51 @@ import { Buffer } from "node:buffer";
 import jwt from "npm:jsonwebtoken";
 import { generateNonce, verifyNonce } from "./nonce.ts";
 import xdrParser from "npm:@stellar/js-xdr";
+import { createConfig, init } from "./config.ts";
+import {
+  validateContractAddress,
+  validateFunctionName,
+  validateAuthEntryStructure,
+  validateConsistentArguments,
+  validateAuthorizationEntrySignatures,
+  validateAuthEntryArguments,
+  extractArguments,
+  hasClientDomainInArgs,
+  validateChallengeRequest,
+  validateTokenRequest,
+} from "./validation/index.ts";
+import type {
+  ChallengeRequest,
+  ChallengeResponse,
+  TokenRequest,
+  TokenResponse,
+  AuthEntryArgs,
+} from "./types.ts";
+import { WebAuthError } from "./types.ts";
 
-const network = Networks[Deno.env.get("NETWORK")! as keyof typeof Networks];
-const webAuthContract = new Contract(Deno.env.get("WEB_AUTH_CONTRACT_ID")!);
-const sourceKeypair = Keypair.fromSecret(Deno.env.get("SOURCE_SIGNING_KEY")!);
-const sep10SigningKeypair = Keypair.fromSecret(
-  Deno.env.get("SERVER_SIGNING_KEY")!,
-);
-const rpc = new SorobanRpc.Server(Deno.env.get("RPC_URL")!);
+const config = createConfig();
+const {
+  network,
+  webAuthContract,
+  sourceKeypair,
+  serverKeypair: sep10SigningKeypair,
+  rpc,
+} = init(config);
 
-export type ChallengeRequest = {
-  account: string;
-  home_domain: string;
-  client_domain: string | undefined;
-};
-
-export type ChallengeResponse = {
-  authorization_entries: string;
-  network_passphrase: string;
-};
-
+/**
+ * Generates a web authentication challenge according to SEP-45
+ * 
+ * This function creates authorization entries that the client must sign
+ * to prove control over their account and complete the authentication flow.
+ */
 export async function getChallenge(
   request: ChallengeRequest,
 ): Promise<ChallengeResponse> {
+  validateChallengeRequest(request);
+  
   const sourceAccount = await rpc.getAccount(sourceKeypair.publicKey());
 
-  // Fetch the signing key from the client domain
+  // Fetch the signing key from the client domain if provided
   let clientDomainAddress: string | undefined = undefined;
   if (request.client_domain !== undefined) {
     try {
@@ -56,6 +71,7 @@ export async function getChallenge(
 
   const nonce = await generateNonce(request.account);
 
+  // Build the `web_auth_verify` invocation arguments
   // NOTE: in js, we can use the `nativeToScVal` helper but we preferred to build the Sc{suffix} objects manually as a reference for other languages.
   const fields = [
     new xdr.ScMapEntry({
@@ -95,6 +111,8 @@ export async function getChallenge(
   const args = [
     xdr.ScVal.scvMap(fields),
   ];
+  
+  // Build and simulate the transaction to get authorization entries
   const builtTransaction = new TransactionBuilder(sourceAccount, {
     fee: BASE_FEE,
     networkPassphrase: network,
@@ -103,7 +121,6 @@ export async function getChallenge(
     .setTimeout(300)
     .build();
 
-  // Simulate the transaction to get the authorization entries
   const simulatedTransaction = await rpc.simulateTransaction(builtTransaction);
   if (SorobanRpc.Api.isSimulationError(simulatedTransaction)) {
     throw new Error(
@@ -113,7 +130,7 @@ export async function getChallenge(
   const authEntries = simulatedTransaction.result!.auth;
 
   // Sign the server's authorization entry
-  const finalAuthEntries = authEntries.map(async (entry) => {
+  const finalAuthEntries = authEntries.map(async (entry: xdr.SorobanAuthorizationEntry) => {
     if (
       entry.credentials().switch() ===
         xdr.SorobanCredentialsType.sorobanCredentialsAddress() &&
@@ -125,7 +142,7 @@ export async function getChallenge(
         entry,
         sep10SigningKeypair,
         validUntilLedgerSeq,
-        Networks.TESTNET,
+        network,
       );
       return signed;
     }
@@ -134,10 +151,7 @@ export async function getChallenge(
 
   const resolvedEntries = await Promise.all(finalAuthEntries);
 
-  const authEntriesType = new xdrParser.Array(
-    xdr.SorobanAuthorizationEntry,
-    resolvedEntries.length,
-  );
+  const authEntriesType = new xdrParser.VarArray(xdr.SorobanAuthorizationEntry, 10);
   const writer = new xdrParser.XdrWriter();
   authEntriesType.write(resolvedEntries, writer);
   const xdrBuffer = writer.finalize();
@@ -145,61 +159,100 @@ export async function getChallenge(
   return {
     authorization_entries: xdrBuffer.toString("base64"),
     network_passphrase: network,
-  } as ChallengeResponse;
+  };
 }
 
-export type TokenRequest = {
-  authorization_entries: string;
-};
-
-export type TokenResponse = {
-  token: string;
-};
-
+/**
+ * Validates signed authorization entries and issues a JWT token if valid
+ */
 export async function getToken(
   request: TokenRequest,
 ): Promise<TokenResponse> {
-  const readBuffer = Buffer.from(request.authorization_entries, "base64");
-  // TODO: this should use VarArray
-  const authEntriesType = new xdrParser.Array(
-    xdr.SorobanAuthorizationEntry,
-    2,
-  );
-  const reader = new xdrParser.XdrReader(readBuffer);
-  const authEntries: xdr.SorobanAuthorizationEntry[] = authEntriesType.read(
-    reader,
-  );
-
-  // Extract args from authorization entry
-  const args = authEntries[0].rootInvocation().function().contractFn().args();
-  const argEntries = args[0].map()!;
-
-  // Check if the nonce exist and is unused
-  const nonce = scValToNative(
-    argEntries.find((entry) => entry.key().sym().toString() === "nonce")!.val(),
-  );
-  const account = scValToNative(
-    argEntries.find((entry) => entry.key().sym().toString() === "account")!
-      .val(),
-  );
-  if (!(await verifyNonce(account, nonce))) {
-    throw new Error("Invalid nonce");
+  validateTokenRequest(request);
+  
+  let readBuffer: Buffer;
+  let authEntries: xdr.SorobanAuthorizationEntry[];
+  
+  try {
+    readBuffer = Buffer.from(request.authorization_entries, "base64");
+    if (readBuffer.length === 0) {
+      throw new Error("Empty buffer");
+    }
+  } catch (_error) {
+    throw new WebAuthError("Invalid base64 encoding in authorization_entries");
+  }
+  
+  try {
+    // Use VarArray to handle dynamic number of authorization entries
+    // 2 entries when no client domain (server + client)
+    // 3 entries when client domain present (server + client + client domain)
+    const authEntriesType = new xdrParser.VarArray(xdr.SorobanAuthorizationEntry, 10);
+    const reader = new xdrParser.XdrReader(readBuffer);
+    authEntries = authEntriesType.read(reader);
+  } catch (_error) {
+    throw new WebAuthError("Invalid XDR encoding in authorization_entries");
   }
 
-  // Construct the transaction using the clients credentials
-  //
-  // Note: the server does not need to validate the authorization entries because the following
-  // scenarios are covered by simulation
-  // 1. if the server's signature is invalid
-  // 2. if the client's signature is missing
-  // 3. if the auth entries contain different arguments
-  const invokeOp = webAuthContract.call("web_auth_verify", ...args);
+  validateAuthEntryStructure(authEntries);
+  
+  // Determine expected entry count based on client domain presence
+  const primaryAuthEntry = authEntries[0];
+  const hasClientDomain = hasClientDomainInArgs(primaryAuthEntry);
+  const expectedEntryCount = hasClientDomain ? 3 : 2;
+  
+  if (authEntries.length !== expectedEntryCount) {
+    throw new WebAuthError(
+      `Invalid number of authorization entries. Expected ${expectedEntryCount} ${hasClientDomain ? '(server + client + client domain)' : '(server + client)'}, got ${authEntries.length}`
+    );
+  }
+  
+  validateConsistentArguments(authEntries);
+  validateContractAddress(primaryAuthEntry, webAuthContract.contractId());
+  validateFunctionName(primaryAuthEntry);
+
+  // Extract and validate arguments
+  const args: AuthEntryArgs = extractArguments(primaryAuthEntry);
+  const {
+    account,
+    home_domain: homeDomain,
+    web_auth_domain: webAuthDomain,
+    web_auth_domain_account: _webAuthDomainAccount,
+    client_domain: clientDomain,
+    client_domain_account: clientDomainAccount,
+    nonce,
+  } = args;
+
+  validateAuthEntryArguments(
+    primaryAuthEntry,
+    account,
+    homeDomain,
+    webAuthDomain,
+    sep10SigningKeypair.publicKey(),
+    clientDomain,
+    clientDomainAccount
+  );
+
+  validateAuthorizationEntrySignatures(
+    authEntries,
+    account,
+    sep10SigningKeypair.publicKey(),
+    clientDomainAccount
+  );
+
+  // Check if the nonce exists and is unused
+  if (!(await verifyNonce(account, nonce))) {
+    throw new WebAuthError("Invalid or already used nonce");
+  }
+
+  // Build transaction for simulation with validated authorization entries
+  const contractArgs = primaryAuthEntry.rootInvocation().function().contractFn().args();
+  const invokeOp = webAuthContract.call("web_auth_verify", ...contractArgs);
   invokeOp.body().invokeHostFunctionOp().auth(authEntries);
 
   const sourceAccount = await rpc.getAccount(sep10SigningKeypair.publicKey());
   const builtTransaction = new TransactionBuilder(sourceAccount, {
     fee: BASE_FEE,
-    networkPassphrase: Networks.TESTNET,
+    networkPassphrase: network,
   })
     .addOperation(invokeOp)
     .setTimeout(300)
@@ -210,31 +263,11 @@ export async function getToken(
     builtTransaction,
   );
 
-  // Check if the response is a success
   if (SorobanRpc.Api.isSimulationError(simulatedTransaction)) {
-    throw new Error(
+    throw new WebAuthError(
       `Transaction simulation failed: ${simulatedTransaction.error}`,
     );
   }
-
-  const webAuthDomain = scValToNative(
-    argEntries.find((entry) =>
-      entry.key().sym().toString() === "web_auth_domain"
-    )!
-      .val(),
-  );
-  // The client domain is optional, only convert to scValToNative if it exists
-  const clientDomainArg = argEntries.find((entry) =>
-    entry.key().sym().toString() === "client_domain"
-  );
-  const clientDomain = clientDomainArg !== undefined
-    ? scValToNative(clientDomainArg.val())
-    : undefined;
-
-  const homeDomain = scValToNative(
-    argEntries.find((entry) => entry.key().sym().toString() === "home_domain")!
-      .val(),
-  );
 
   const token = jwt.sign({
     iss: webAuthDomain,
@@ -242,14 +275,14 @@ export async function getToken(
     iat: Math.floor(Date.now() / 1000),
     exp: Math.floor(Date.now() / 1000) + 300,
     jti: createHash("sha256").update(Buffer.from(invokeOp.toXDR().buffer))
-      .digest(
-        "hex",
-      ),
+      .digest("hex"),
     client_domain: clientDomain,
     home_domain: homeDomain,
-  }, Deno.env.get("JWT_SECRET")!);
+  }, config.jwtSecret);
 
-  return {
-    token: token,
-  } as TokenResponse;
+  return { token };
 }
+
+// Re-export types and errors for backward compatibility
+export { WebAuthError } from "./types.ts";
+export type { ChallengeRequest, ChallengeResponse, TokenRequest, TokenResponse } from "./types.ts";

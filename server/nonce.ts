@@ -1,3 +1,8 @@
+/**
+ * Generates a unique nonce for a given key.
+ * @param key The key to associate with the nonce.
+ * @returns The generated nonce.
+ */
 export async function generateNonce(key: string): Promise<string> {
   const kv = await Deno.openKv();
   // generate a random u32
@@ -18,6 +23,12 @@ export async function generateNonce(key: string): Promise<string> {
   return nonce[0].toString();
 }
 
+/**
+ * Verifies the validity of a nonce for a given key.
+ * @param key The key associated with the nonce.
+ * @param nonce The nonce to verify.
+ * @returns True if the nonce is valid, false otherwise.
+ */
 export async function verifyNonce(
   key: string,
   nonce: string,

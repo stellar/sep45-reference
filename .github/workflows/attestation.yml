@@ -23,7 +23,7 @@ jobs:
 
       - name: Set up env vars
         run: |
-          echo "WASM_FILE=contracts/target/wasm32v1-none/release/web_auth_verify.wasm" >> $GITHUB_ENV
+          echo "WASM_FILE=contracts/target/wasm32v1-none/release/web_auth.wasm" >> $GITHUB_ENV
 
       - uses: stellar/stellar-cli@v23.3.0
         with:
@@ -35,17 +35,17 @@ jobs:
           stellar contract build \
             --meta source_repo=github:${{ github.repository }}
 
-          stellar contract optimize --wasm target/wasm32v1-none/release/web_auth_verify.wasm
-          cp target/wasm32v1-none/release/web_auth_verify.optimized.wasm target/wasm32v1-none/release/web_auth_verify.wasm
+          stellar contract optimize --wasm target/wasm32v1-none/release/web_auth.wasm
+          cp target/wasm32v1-none/release/web_auth.optimized.wasm target/wasm32v1-none/release/web_auth.wasm
 
       - name: Upload to Artifacts
         uses: actions/upload-artifact@v4
         with:
-          name: web_auth_verify.wasm
+          name: web_auth.wasm
           path: ${{ env.WASM_FILE }}
 
       - name: Build Attestation for Release
         uses: actions/attest-build-provenance@v1
         with:
-          subject-name: web_auth_verify.wasm
+          subject-name: web_auth.wasm
           subject-path: ${{ env.WASM_FILE }}

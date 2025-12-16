@@ -1,0 +1,116 @@
+---
+name: Release (Tag)
+on:
+  push:
+    tags:
+      - "v*"
+
+  workflow_dispatch:
+    inputs:
+      release_name:
+        description: "Release Version (e.g. v0.0.0)"
+        required: true
+        type: string
+
+permissions:
+  id-token: write
+  contents: write
+  attestations: write
+
+env:
+  RUST_TOOLCHAIN: ${{ vars.RUST_TOOLCHAIN || '1.92.0' }}
+
+jobs:
+  build_and_test:
+    uses: ./.github/workflows/contract_build.yml
+    secrets: inherit
+
+  release:
+    needs: build_and_test
+    runs-on: ubuntu-latest
+    concurrency: release-${{ github.event.inputs.release_name || github.ref }}
+    steps:
+      - uses: actions/checkout@v5
+
+      - name: Install pinned Rust toolchain
+        run: |
+          rustup toolchain install ${RUST_TOOLCHAIN} --profile minimal --target wasm32v1-none
+          rustup default ${RUST_TOOLCHAIN}
+        env:
+          RUSTUP_TOOLCHAIN: ${{ env.RUST_TOOLCHAIN }}
+
+      - name: Cache Rust dependencies
+        uses: stellar/actions/rust-cache@main
+
+      - run: rustup target add wasm32v1-none
+        env:
+          RUSTUP_TOOLCHAIN: ${{ env.RUST_TOOLCHAIN }}
+
+      - run: cargo +${RUST_TOOLCHAIN} version
+
+      - name: Set up env vars
+        run: |
+          echo "WASM_FILE=contracts/target/wasm32v1-none/release/web_auth.wasm" >> $GITHUB_ENV
+
+          if [ -n "${{ github.event.inputs.release_name }}" ]; then
+            echo "TAG_NAME=${{ github.event.inputs.release_name }}" >> $GITHUB_ENV
+          else
+            echo "TAG_NAME=${{ github.ref_name }}" >> $GITHUB_ENV
+          fi
+
+      - uses: stellar/stellar-cli@v23.3.0
+        with:
+          version: 23.3.0
+
+      - name: Build contract
+        working-directory: contracts
+        run: |
+          stellar contract build \
+            --meta source_repo=github:${{ github.repository }}
+
+          stellar contract optimize --wasm target/wasm32v1-none/release/web_auth.wasm
+          cp target/wasm32v1-none/release/web_auth_verify.optimized.wasm target/wasm32v1-none/release/web_auth.wasm
+
+      - name: Upload to Artifacts
+        uses: actions/upload-artifact@v4
+        with:
+          name: web_auth.wasm
+          path: ${{ env.WASM_FILE }}
+
+      - name: Build Attestation for Release
+        uses: actions/attest-build-provenance@v2.0.1
+        with:
+          subject-name: web_auth.wasm
+          subject-path: ${{ env.WASM_FILE }}
+
+      - name: Make a new Release
+        id: release
+        uses: actions/github-script@v7
+        with:
+          github-token: ${{ secrets.GITHUB_TOKEN }}
+          script: |
+            const response = await github.rest.repos.createRelease({
+              owner: context.repo.owner,
+              repo: context.repo.repo,
+              tag_name: '${{ env.TAG_NAME }}',
+              target_commitish: '${{ github.sha }}',
+              make_latest: 'true'
+            });
+
+            const { data } = response;
+            core.setOutput('release_id', data.id);
+
+      - name: Upload to Release
+        uses: actions/github-script@v7
+        with:
+          github-token: ${{ secrets.GITHUB_TOKEN }}
+          script: |
+            const fs = require('fs');
+            const path = require('path');
+            await github.rest.repos.uploadReleaseAsset({
+              owner: context.repo.owner,
+              repo: context.repo.repo,
+              release_id: '${{ steps.release.outputs.release_id }}',
+              name: path.basename('${{ env.WASM_FILE }}'),
+              data: fs.readFileSync('${{ env.WASM_FILE }}'),
+            });

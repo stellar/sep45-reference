@@ -33,7 +33,7 @@ pub enum WebAuthError {
 
 #[contractimpl]
 impl WebAuthContract {
-    pub fn __constructor(env: Env, admin: Address) -> () {
+    pub fn __constructor(env: Env, admin: Address) {
         env.storage().instance().set(&DataKey::Admin, &admin);
     }
 
@@ -45,7 +45,9 @@ impl WebAuthContract {
             return Err(WebAuthError::MissingArgument);
         }
 
-        if let Some(web_auth_domain_account) = args.get(Symbol::new(&env, "web_auth_domain_account")) {
+        if let Some(web_auth_domain_account) =
+            args.get(Symbol::new(&env, "web_auth_domain_account"))
+        {
             let addr = Address::from_string(&web_auth_domain_account);
             addr.require_auth();
         } else {

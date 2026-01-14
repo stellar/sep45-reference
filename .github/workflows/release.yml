@@ -72,7 +72,7 @@ jobs:
           path: ${{ env.WASM_FILE }}
 
       - name: Build Attestation for Release
-        uses: actions/attest-build-provenance@v2.0.1
+        uses: actions/attest-build-provenance@v1
         with:
           subject-name: web_auth.wasm
           subject-path: ${{ env.WASM_FILE }}

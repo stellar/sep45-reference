@@ -4,7 +4,13 @@ on:
   push:
     branches:
       - main
+    paths:
+      - "contracts/**"
+      - ".github/workflows/contract_build.yml"
   pull_request:
+    paths:
+      - "contracts/**"
+      - ".github/workflows/contract_build.yml"
   workflow_call: # allows this workflow to be called from another workflow
 
 env:
@@ -36,10 +42,10 @@ jobs:
         with:
           cache-targets: wasm32v1-none
 
-      - name: Install cargo-audit
+      - name: Install cargo-deny
         run: |
-          if ! command -v cargo-audit &> /dev/null; then
-            cargo install cargo-audit
+          if ! command -v cargo-deny &> /dev/null; then
+            cargo install cargo-deny
           fi
 
       - name: Format check
@@ -48,8 +54,8 @@ jobs:
       - name: Lint with Clippy
         run: cargo +${RUST_TOOLCHAIN} clippy --all-targets --all-features -- -D warnings
 
-      - name: Security audit
-        run: cargo +${RUST_TOOLCHAIN} audit
+      - name: Cargo deny check
+        run: cargo +${RUST_TOOLCHAIN} deny check advisories
 
       - name: Run tests
         run: cargo +${RUST_TOOLCHAIN} test --all-features -- --nocapture

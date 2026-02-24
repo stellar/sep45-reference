@@ -42,12 +42,6 @@ jobs:
         with:
           cache-targets: wasm32v1-none
 
-      - name: Install cargo-deny
-        run: |
-          if ! command -v cargo-deny &> /dev/null; then
-            cargo install cargo-deny
-          fi
-
       - name: Format check
         run: cargo +${RUST_TOOLCHAIN} fmt -- --check
 
@@ -55,7 +49,14 @@ jobs:
         run: cargo +${RUST_TOOLCHAIN} clippy --all-targets --all-features -- -D warnings
 
       - name: Cargo deny check
-        run: cargo +${RUST_TOOLCHAIN} deny check advisories
+        uses: EmbarkStudios/cargo-deny-action@3fd3802e88374d3fe9159b834c7714ec57d6c979
+        env:
+          RUSTC_WRAPPER: ""
+        with:
+          rust-version: ${{ env.RUST_TOOLCHAIN }}
+          manifest-path: ./contracts/Cargo.toml
+          command: check
+          command-arguments: advisories
 
       - name: Run tests
         run: cargo +${RUST_TOOLCHAIN} test --all-features -- --nocapture

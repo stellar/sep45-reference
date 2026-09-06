@@ -1,0 +1,74 @@
+name: Deploy Latest Attested WASM (Testnet)
+
+on:
+  workflow_dispatch:
+    inputs:
+      release_tag:
+        description: "Release tag to deploy (e.g. v1.2.3)"
+        required: true
+        type: string
+
+permissions:
+  contents: read
+  attestations: read
+
+env:
+  WASM_NAME: web_auth.wasm
+
+jobs:
+  deploy:
+    runs-on: ubuntu-latest
+    concurrency:
+      group: deploy-testnet
+      cancel-in-progress: false
+    steps:
+      - name: Download release Wasm
+        env:
+          GH_TOKEN: ${{ github.token }}
+          RELEASE_TAG: ${{ inputs.release_tag }}
+        run: |
+          gh release download "$RELEASE_TAG" \
+            --repo "$GITHUB_REPOSITORY" \
+            --pattern "$WASM_NAME" \
+            --clobber
+
+      - name: Verify Wasm attestation
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          gh attestation verify \
+            --repo "$GITHUB_REPOSITORY" \
+            "$WASM_NAME"
+
+      - uses: stellar/stellar-cli@v25.1.0
+        with:
+          version: 25.1.0
+
+      - name: Deploy to testnet
+        shell: bash
+        env:
+          DEPLOYER_SECRET_KEY: ${{ secrets.SEP45_DEPLOYER_SECRET_KEY }}
+          DEPLOYER_SALT: ${{ vars.SEP45_DEPLOYER_SALT }}
+        run: |
+          set -euo pipefail
+
+          STELLAR_CONFIG_DIR="$(mktemp -d "$RUNNER_TEMP/stellar.XXXXXX")"
+          trap 'rm -rf "$STELLAR_CONFIG_DIR"' EXIT
+
+          STELLAR_SECRET_KEY="$DEPLOYER_SECRET_KEY" \
+            stellar keys add deployer --overwrite --config-dir "$STELLAR_CONFIG_DIR"
+          unset DEPLOYER_SECRET_KEY
+
+          DEPLOYER_ADDRESS="$(stellar keys address deployer --config-dir "$STELLAR_CONFIG_DIR")"
+
+          if ! stellar keys fund deployer --network testnet --quiet --config-dir "$STELLAR_CONFIG_DIR"; then
+            echo "Unable to fund deployer via Friendbot; continuing to deploy."
+          fi
+
+          stellar contract deploy \
+            --wasm "$WASM_NAME" \
+            --source-account "$DEPLOYER_ADDRESS" \
+            --sign-with-key deployer \
+            --network testnet \
+            --salt "$DEPLOYER_SALT" \
+            --config-dir "$STELLAR_CONFIG_DIR"
